@@ -1,0 +1,273 @@
+---
+title: "Stylistic Mapping of *Trykkefrihedens Skrifter*"
+author: "Florian Meier"
+date: "4/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### The Freedom of the Press Writings
+![](https://www.kb.dk/sites/default/files/styles/rdl_custom/public/2020-09/birckner_om_trykkefriheden_og_dens_love.png?h=d77665b1&itok=4OXx_7cF)
+
+The *Trykkefrihedensskrifter* or *Freedom of the Press Writings* is a collection of small books (pamphlets) that got published during the press freedom era in Denmark between 1770 and 1773. Before that period, all books that people wanted to get published had to be approved by university professors. Through [Johann Friedrich Struensee's](https://en.wikipedia.org/wiki/Johann_Friedrich_Struensee) reforms this was not longer necessary and people started to write and publish their thoughts in the form of small pamphlets. In these pamphlets, the authors discussed everything from serious political, philosophical, economic treatises, political commentary, criticism and satire, over essay writing, fiction and entertainment to gossip, libel and pornography. [Bolle Willum Luxdorph](https://en.wikipedia.org/wiki/Bolle_Willum_Luxdorph), a Danish government official at that time, collected around 1000 of these pamphlets, which have now been digitized and made accessible via the Danish Royal Library. [You can have a look at all the books here](https://tekster.kb.dk/pages/tfs-bibliografi).
+
+This was made possible by a book project. My colleague Frederik Stjernfelt wrote a massive book about the pamphlets and this time called [Grov Konfækt](https://www.gyldendal.dk/produkter/grov-konfakt-9788702297676) which [received a lot of praise by the media](https://www.berlingske.dk/aok/seks-stjerner-til-storvaerk-om-ytringsfrihed-der-blev-gaaet-til-makronerne-i).
+
+#### Why am I interested in these books? 
+Well, I have a passion for Digital Humanities and getting insights into a large corpus of Danish pamphlets seemed like a very interesting project. One aspect that is really crucial about the 1000 books is that half of them are of unknown authorship. About a year ago I made the first efforts to find out who the authors of these books with unknown authorships were. In academia this discipline is usually called Styleometry which aims at solving such authorship attribution problems. Back then I tried an approach called bootstrapp consensus networks. I haven't really had much success with this approach, but the results of these experiments can be [found in this DHiNorden 2020 paper](http://ceur-ws.org/Vol-2612/paper8.pdf).
+
+$~$
+
+#### Why is authorship attribution (AA) in the Freedom of the Press Writings such a difficult problem?
+Well there are three reasons: 
+
+(1) The OCR has a lot of errors which makes the collection difficult to work with. AA algorithms depend on error free text so style can be detected. I am still waiting for an improved version of the OCR which could potentially lead to better AA results. 
+
+(2) In principle, this is not a classic AA problem. In a classic AA problem one would have only a couple of unknown books and a clear set of potential authors of these books. In this case one would do some kind of machine learning based on training material of books with known authors with features that capture the style of these authors to predict which of the known writers is most likely also the author of the book(s) in question. This is not the case here. We don't know the author of around half of these books, and whether all potential authors are actually known is not given either. However, how we nevertheless can try to approach this problem will be outlined below. By collecting small evidences I try to narrow down on a smaller set of books with known/unkown authors which would then make a classic AA scenario possible. Let's start to collect some evidence. 
+
+(3) The books are characterized by many different gernes and languages. We can find German, French and English books. Some books contain poems, lyrics or only lists of commodities. For now I tried to filter as many out as possible focusing only on 'normal' text. Thus this reduced the number of books to 735 presented here.
+
+$~$
+
+#### Step 1: Basic Lexical Concepts and Measurements
+In a first step, I want to investigate whether by only looking at lexical concepts like measures of vocabulary richness (e.g. [type-token-ratio](https://en.wikipedia.org/wiki/Lexical_density)) or the share of *big words* tell us something about how different the style of our authors is and how the idiosyncrasies in writing style are manifested. Let's look at some summary statistics of these measures for the top ten most publishing authors in the dataset.
+
+```{r step1_summarytable,echo=FALSE,warning=FALSE,message=FALSE}
+library(tidymodels)
+library(textrecipes)
+library(readxl)
+library(tidyverse)
+library(factoextra)
+library(cluster)
+library(tidytext)
+library(tm)
+library(lsa)
+library(ggrepel)
+library(widyr)
+library(embed)
+library(irlba)
+library(plotly)
+library(wesanderson)
+library(forcats)
+library(knitr)
+library(kableExtra)
+theme_set(theme_minimal())
+set.seed(123)
+
+source('books_to_filter.R')
+freedom_data <- read_csv("data/freedom_data_punctuation.csv")
+lux_collection <- read_excel("data/lux-collection.xls")
+
+# Clean the excel and merge with original
+lux_collection<-lux_collection%>%filter(!is.na(book))%>%
+  unite('book_id',c('series','volume','book'),
+        sep="_",remove='TRUE')%>%
+  select(book_id,author=`Forfatter (anonym)`,year=år)%>%
+  mutate(author=str_replace_all(author,"\\[|\\]",""))%>%
+  filter(!book_id%in%books_to_filter)%>%
+  mutate(author=str_replace_all(author," ",""))
+
+
+freedom_data_complete<-lux_collection%>%
+          left_join(freedom_data,by=c('book_id'))
+
+freedom_data_complete<-freedom_data_complete%>%
+                      mutate(author=ifelse(author=='?',
+                        paste0('Book_ID_',book_id),author))%>%
+                            filter(!is.na(book_text))
+
+freedom_data_complete<-freedom_data_complete%>%
+          group_by(book_id,author)%>%mutate(
+           book_char_count= (str_length(book_text) - str_count(book_text,' ')),
+              book_token_count= str_count(book_text,"\\S+"),
+                book_avg_token_length=(book_char_count/book_token_count))
+
+freedom_data_complete<-freedom_data_complete%>%group_by(book_id,author)%>%
+  mutate(book_types = length(unique(unlist(str_split(book_text,' ')))),
+         type_token_ratio_book = book_types/book_token_count)%>%
+    mutate(herdan_c = log(book_types)/log(book_token_count))
+
+book_stats_overview<-freedom_data_complete%>%ungroup%>%select(book_id,author,book_text)%>%unnest_tokens(input = book_text,output = sent,token='regex', pattern= '\\w\\.\\W')%>%
+                    mutate(sent_length = str_count(sent,'\\S+'))%>%
+                        filter(sent_length>4)%>%
+                         group_by(book_id,author)%>%
+                            summarise(avg_sent_length=mean(sent_length))%>%                        left_join(freedom_data_complete,by=c('book_id','author'))%>%
+                select(-book_text)
+
+book_stats_overview_summarised<-book_stats_overview%>%
+              select(-year,-book_char_count)%>%
+                  group_by(author)%>%
+                    mutate(num_books=n())%>%
+                      group_by(author,num_books)%>%
+                        summarise(across(where(is.numeric),
+                            ~mean(.x,na.rm=TRUE),.names = "mean_{.col}"))%>%arrange(desc(num_books))%>%head(n=10)
+
+kable(book_stats_overview_summarised,digits=2)%>%
+          kable_paper("hover", full_width = F)%>%
+              kable_styling(font_size=12)
+```
+
+$~$
+
+Martin Brun wrote 54 pamphlets and is the most represented author. However, his books are rather short. The others, especially L.Jæger, write much longer books. The average token length is supposed to cover the aspect of who might use long words. But no real differences become evident. The [type-token-ratio (TTR)](https://en.wikipedia.org/wiki/Lexical_density) is, as already mentioned, a measure that covers vocabulary richness. The higher this ratio the more unique words an author is using which hints towards a presence of a rich vocabulary. However, care needs to be taken as this value is not normalized with resepct to text lenght which means that longer texts automatically have a lower TTR. In our case Brun seems to use a richer vocabulary compared to Thura, Lütken and Jaeger, but this is probably due to their texts being longer. A text-lenght normalized value of vocabulary richness is [Herdan's C](https://quanteda.io/reference/textstat_lexdiv.html).
+And when looking at the values there are basically no differences. Finally, average sentence lenght differs strongly. Jaeger has very long sentences while Bie very short ones. Now this value is not very reliable, because the bad OCR doesn't really reliable cover interpunctation signs so this could lead to false sentence detection. To sum up, the lexical measure don't really show strong differenes for the most publishing authors which in result also means that they might be difficult to distinguish using those as features.
+
+$~$
+
+#### Step 2: Burrow's Delta
+For authorship attribution, Burrow suggest using the most frequent word types (MFW) as these very frequent items (which mainly correspond to function words) are used mainly unconsciously by the author and thus suitable to reflect his style. Every author is then represented by a feature vector or an author profile which can be used to calculate the distance to author authors or single texts. Single text of unknown authorship very close to an authors' profile could be an indicator that this text was in fact written by that author. To do this I take the following steps:
+
+* For known authors, all their texts are pasted together so author profiles can be created.
+* This is done by taking the 300 MFW in the whole corpus consisting of uni- bi- or trigrams (depending on the frequency). Now, each text with unknown authorship and author profiles are represented by a vector with 300 entries.
+* The values in the vector are not raw frequencies. They are relative to text length and [z-standardised or normalized](https://en.wikipedia.org/wiki/Standard_score) with respect to the occurrence frequency of that feature in the corpus. This means each feature vector has a mean of 0 and a standard deviation of 1.
+
+These vectors can be used to calculate the distance between pamphlets with unknown authorship to author profiles. Moreover, we can check which authors have a similar style, i.e. a small Delta distance value between each other. Again those authors might be difficult to distinguish from one another.
+
+
+Let's first have a look at [pamphlet with ID 1.1.10](https://tekster.kb.dk/pages/tfs-bibliografi) which, according to the bibliography, is of unknown authorship. One can see quite many authors having similar Delta distance values with respect to this pamphlet, making it quite difficult to collect evidence for who might be the real author. 
+
+
+```{r step2_burrowsdelta,echo=FALSE,warning=FALSE,message=FALSE}
+freedom_data_prep<-freedom_data_complete%>%ungroup%>%
+                            select(author,book_text)%>%
+                                group_by(author)%>%
+                                  #Building the author profile by adding the texts together
+                                    summarise(book_text=paste0(book_text,collapse=' '))
+
+recipe_freedom_data<- recipe(~., 
+                       data = freedom_data_prep) %>%
+                        update_role(author,new_role = 'id') %>%
+                          step_tokenize(book_text) %>%
+                            step_ngram(book_text,
+                              min_num_tokens=1,num_tokens = 3)%>%
+                          step_tokenfilter(book_text, max_tokens = 300) %>%
+                            step_tf(book_text,weight_scheme='term frequency') %>%
+                              step_normalize(all_predictors()) %>%
+                                  prep()
+
+freedom_data_delta<-juice(recipe_freedom_data)
+
+pairwise_delta<-freedom_data_delta%>%
+            pivot_longer(-author,
+                    names_to = 'feature',
+                          values_to = 'value')%>%
+              pairwise_delta(item = author,
+               feature=feature,value=value,upper=FALSE)
+
+barchart_1_1_10<-pairwise_delta%>%
+        filter(item1=='Book_ID_1_1_10')%>%
+          arrange(delta)%>%head(n=10)%>%
+            ggplot(aes(y=fct_reorder(
+              item2,desc(delta)),x=delta))+geom_col()+
+                labs(x='Delta Distance',y='',title='Top 10 Closest Author Profiles to Pamphlet 1.1.10')
+
+barchart_2_13_1<-pairwise_delta%>%
+  filter(item1=='Book_ID_2_13_1')%>%
+  arrange(delta)%>%head(n=10)%>%
+  ggplot(aes(y=fct_reorder(
+    item2,desc(delta)),x=delta))+geom_col()+
+  labs(x='Delta Distance',y='',title='Top 10 Closest Author Profiles to Pamphlet 2.13.1')
+
+ggplotly(barchart_1_1_10)
+```
+
+$~$
+
+When [looking at pamphlet 2.13.1](https://tekster.kb.dk/text/tfs-texts-2_013-shoot-workid2_013_001) we see that there is actually quite a gap between the closest author Bie and the next closet one Martin Brun. This might suggest that Bie is the real author of that book. However, we would have to study that in more detail.
+
+```{r step2_barchart,echo=FALSE,warning=FALSE,message=FALSE}
+ggplotly(barchart_2_13_1)
+```
+
+$~$
+
+##### Which authors might be difficult to distinguish?
+We can look at a heatmap of Delta distances between authors. Let's for now focus on the 20 authors with the most books published. This is an interactive graph so feel free to explore it in detail. We can see that some authors have a distinct writing styles, but this is unfortunately not for all the case. In general, the Delta distance is only ranging from 0.25 - 0.50. However, in the whole corpus large distances of 1.5 can be observerd. However, when looking at Martin Brun, for example, he is close to many known authors. 
+
+
+```{r step2_heatmap,echo=FALSE,warning=FALSE,message=FALSE}
+#Which authors might be very difficult to distinguish?
+every_nth = function(n) {
+  return(function(x) {x[c(TRUE, rep(FALSE, n - 1))]})
+}
+
+#little helper to get the top20 most published                                 
+top20_names<-book_stats_overview_summarised%>% 
+  arrange(desc(num_books))%>%
+  head(n=20)%>%pull(author)
+
+
+heatmap_authors<-pairwise_delta%>%
+      filter(!str_detect(item1,'Book'),
+              !str_detect(item2,'Book'))%>%
+        filter(item1%in%top20_names,item2%in%top20_names)%>%
+ggplot(mapping=aes(x=item2,y=item1,fill=delta))+
+            geom_tile(color='white',size = 0.5)+
+  scale_fill_continuous(high = "#132B43", low = "#56B1F7")+
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.line = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()
+        )+
+          scale_x_discrete(breaks = every_nth(n = 1))+
+          labs(y='',x='',fill="Delta Distance")
+              
+ggplotly(heatmap_authors)
+
+```
+
+$~$
+
+#### Step3: Using UMAP for dimensionality reduction
+For collecting even more evidence and sorting out which pamphlets it is worth to investigate further, I want to perform a visualization of all author profiles and texts. We can't just do a regular scatterplot as we don't only have 2 but 300 dimensions to plot. So how can we solve that problem? We use an algorithm for reducing the 300 dimensions from the MFW to 2 which we can plot. In this case, I used [UMAP](https://umap-learn.readthedocs.io/en/latest/faq.html) (Uniform Manifold Approximation and Projection for Dimension Reduction) an algorithm that does similar things like a Principal Component Analysis (PCA) or [Single Value Decomposition (SVD)](https://en.wikipedia.org/wiki/Singular_value_decomposition), namely reducing our dimensions which makes visualisation easier.
+
+
+```{r step3_umap,echo=FALSE,warning=FALSE,message=FALSE}
+recipe_umap_freedom_data<-recipe(~.,data=recipe_freedom_data%>%juice())%>%
+                       update_role(author,new_role = 'id')%>%
+                          step_umap(all_predictors())%>%
+                            prep()
+
+# Turn the recipe into DF and some of the known authors to their name   
+umap_freedom_data<-juice(recipe_umap_freedom_data)%>%
+                          mutate(author_known = ifelse(str_detect(
+                                    author,'Book'),'NO','YES'))%>%
+                            mutate(author_known=
+                                        case_when(author == 'MartinBrun' ~ 'MartinBrun',
+                                                  author == 'J.L.Bynch' ~ 'J.L.Bynch',
+                                                  author == 'L.Jæger' ~ 'L.Jæger',
+                                                  author == 'J.C.Bie' ~ 'J.C.Bie',
+                                                  author == 'Book_ID_2_13_1' ~ 'ID-2.13.1',
+                                                  TRUE  ~as.character(author_known)))
+
+#create the interactive plot  
+interactive_plot<-ggplot(umap_freedom_data,
+                      mapping=aes(x=umap_1,y=umap_2,
+                          name=author,color=author_known,
+                            fill=author_known))+
+                              geom_point(alpha=0.6)+
+        scale_fill_viridis_d()+
+        scale_color_viridis_d()+
+        #scale_fill_manual(values = wes_palette("Darjeeling2"))+
+        #scale_color_manual(values = wes_palette("Darjeeling2"))+
+          labs(title='UMAP Dimension Reduction of 300 MFW Vectors',
+                x='Dimension 1',y='Dimension 2', 
+                    color='Author Known?', fill='')
+
+ggplotly(interactive_plot)
+    
+```
+
+
+This is again an interactive plot. Feel free to explore all points. You can also hide certain points or make them visible by clicking at the legend on the right. Some points might be hidden so it is worth to hide the dots with no author names to see that Bie and Bynch are quite close and thus similar in style? In fact, when looking at the heatmap above (Step 2) Bie and Bynch are only distant by 0.39. However, Bie and Martin Brun are also only distant by 0.50. Brun, however, lies on the other side of the plot. Moreover, the pamphlet with unknown authorship 2.13.1, which has a low Delta distance to Bie is quite distant position in the UMAP plot, with Bynch and Jæger being much closer to this book, two authors that are not even in the top 10 of closest author profiles following the delta distance bart chart. How should this be interpreted? I don't know so far :). Which 'distance' is more reliable, or in other words, better reflecting the author's writing style? The metric Delta distance or the visual UMAP distance? Btw. I also tried to do a PCA and when plotting the first two dimension a similar picture emerges.
+
+$~$
+
+#### What's next?
+Did the 300 uni- bi- and trigram MFW feature vectors capture the style of our authors? Well... to some degree. However, one could certainly explore further options like more features or adding punctuation. The aspects presented here will be the basis for collecting evidence on which set of pamphlets with unknown authorship can be matched with potential author profile candidates for a classic closed-set authorship attribution scenario. In this scenario, I will use various machine learning algorithms and features to perform multinominal text classification. Stay tuned for more infos .... but for now I will wait till I get my hands on the improved set of OCRed books.
